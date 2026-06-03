@@ -319,7 +319,7 @@ public sealed class TaskViewManager : IDisposable
             var imageName = isUrl ? "" : Path.GetFileNameWithoutExtension(resolved);
             if (string.IsNullOrEmpty(imageName) && !isUrl) imageName = resolved;
 
-            if (!isUrl && !string.IsNullOrEmpty(imageName) && IsAnyWindowOnDesktop(imageName, target))
+            if (!isUrl && !string.IsNullOrEmpty(imageName) && IsAnyWindowOnDesktop(imageName))
             {
                 return;
             }
@@ -489,30 +489,30 @@ public sealed class TaskViewManager : IDisposable
     }
 
     /// <summary>
-    /// Returns true if any running process with the given image name has a visible
-    /// main window that is already placed on the target virtual desktop.
+    /// Returns true if any running process with the given image name has a
+    /// visible main window. Since OnCurrentChanged fires AFTER a desktop switch,
+    /// a visible window means the program is already on the target desktop.
+    /// Windows on other virtual desktops are hidden by the OS and will report
+    /// IsWindowVisible=false.
     /// </summary>
-    private bool IsAnyWindowOnDesktop(string imageName, VirtualDesktop target)
+    private static bool IsAnyWindowOnDesktop(string imageName)
     {
         if (string.IsNullOrEmpty(imageName)) return false;
-        if (_windowDesktopResolver is null) return false;
 
         Process[] procs;
         try { procs = Process.GetProcessesByName(imageName); }
         catch { return false; }
 
-        var targetId = target.Id;
         foreach (var p in procs)
         {
             try
             {
                 if (p.MainWindowHandle == IntPtr.Zero) continue;
-                var desktopId = _windowDesktopResolver(p.MainWindowHandle);
-                if (desktopId == targetId)
+                if (NativeMethods.IsWindowVisible(p.MainWindowHandle))
                 {
                     Log.Information(
-                        "Auto-launch: {Name} already has a window on '{Desktop}' (hwnd {Hwnd}) — skipping",
-                        imageName, target.Name, p.MainWindowHandle);
+                        "Auto-launch: {Name} already has a visible window (hwnd {Hwnd}) — skipping",
+                        imageName, p.MainWindowHandle);
                     return true;
                 }
             }
