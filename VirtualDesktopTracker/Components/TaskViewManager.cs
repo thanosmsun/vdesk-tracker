@@ -319,6 +319,11 @@ public sealed class TaskViewManager : IDisposable
             var imageName = isUrl ? "" : Path.GetFileNameWithoutExtension(resolved);
             if (string.IsNullOrEmpty(imageName) && !isUrl) imageName = resolved;
 
+            if (!isUrl && !string.IsNullOrEmpty(imageName) && IsAnyWindowOnDesktop(imageName, target))
+            {
+                return;
+            }
+
             if (!isUrl)
             {
                 bool launched = false;
@@ -481,6 +486,45 @@ public sealed class TaskViewManager : IDisposable
                 "the app may be minimized to the tray, a background process, or not yet fully started",
                 imageName);
         }
+    }
+
+    /// <summary>
+    /// Returns true if any running process with the given image name has a visible
+    /// main window that is already placed on the target virtual desktop.
+    /// </summary>
+    private bool IsAnyWindowOnDesktop(string imageName, VirtualDesktop target)
+    {
+        if (string.IsNullOrEmpty(imageName)) return false;
+        if (_windowDesktopResolver is null) return false;
+
+        Process[] procs;
+        try { procs = Process.GetProcessesByName(imageName); }
+        catch { return false; }
+
+        var targetId = target.Id;
+        foreach (var p in procs)
+        {
+            try
+            {
+                if (p.MainWindowHandle == IntPtr.Zero) continue;
+                var desktopId = _windowDesktopResolver(p.MainWindowHandle);
+                if (desktopId == targetId)
+                {
+                    Log.Information(
+                        "Auto-launch: {Name} already has a window on '{Desktop}' (hwnd {Hwnd}) — skipping",
+                        imageName, target.Name, p.MainWindowHandle);
+                    return true;
+                }
+            }
+            catch
+            {
+            }
+            finally
+            {
+                try { p.Dispose(); } catch { }
+            }
+        }
+        return false;
     }
 
     private static bool MoveWindowToDesktop(IntPtr hwnd, VirtualDesktop target)
