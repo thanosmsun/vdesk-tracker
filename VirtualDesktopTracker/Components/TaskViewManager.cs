@@ -491,74 +491,33 @@ public sealed class TaskViewManager : IDisposable
 
     private static bool IsAnyWindowOnDesktop(string imageName)
     {
-        if (string.IsNullOrEmpty(imageName))
+        if (string.IsNullOrEmpty(imageName)) return false;
+
+        var vdm = VirtualDesktopManager24H2.TryCreate();
+        if (vdm is null)
         {
-            Log.Information("Auto-launch DIAG: empty imageName — returning false");
+            Log.Information("Auto-launch: VDM24H2 unavailable — will launch unconditionally");
             return false;
         }
 
         Process[] procs;
         try { procs = Process.GetProcessesByName(imageName); }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "Auto-launch DIAG: GetProcessesByName threw for {Name}", imageName);
-            return false;
-        }
-
-        Log.Information("Auto-launch DIAG: GetProcessesByName({Name}) returned {Count} process(es)",
-            imageName, procs.Length);
-
-        if (procs.Length == 0)
-        {
-            Log.Information("Auto-launch DIAG: no {Name} processes found — will launch", imageName);
-            return false;
-        }
+        catch { return false; }
 
         foreach (var p in procs)
         {
             try
             {
-                var hwnd = p.MainWindowHandle;
-                var pid = p.Id;
-                var hasExited = false;
-                try { hasExited = p.HasExited; } catch { }
-
-                Log.Information("Auto-launch DIAG: process {Name} PID={Pid} HasExited={Exited} MainWindowHandle={Hwnd}",
-                    imageName, pid, hasExited, hwnd);
-
-                if (hwnd == IntPtr.Zero)
+                if (p.MainWindowHandle == IntPtr.Zero) continue;
+                if (vdm.IsWindowOnCurrentVirtualDesktop(p.MainWindowHandle))
                 {
-                    Log.Information("Auto-launch DIAG: PID={Pid} MainWindowHandle is IntPtr.Zero — skipping", pid);
-                    continue;
-                }
-
-                var isVisible = NativeMethods.IsWindowVisible(hwnd);
-                Log.Information("Auto-launch DIAG: PID={Pid} hwnd={Hwnd} IsWindowVisible={Visible}",
-                    pid, hwnd, isVisible);
-
-                if (isVisible)
-                {
-                    Log.Information(
-                        "Auto-launch DIAG: PID={Pid} IS VISIBLE — BLOCKING launch for {Name}", pid, imageName);
+                    Log.Information("Auto-launch: {Name} already on current desktop — skipping", imageName);
                     return true;
                 }
-                else
-                {
-                    Log.Information(
-                        "Auto-launch DIAG: PID={Pid} is NOT visible — continuing to check other processes", pid);
-                }
             }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Auto-launch DIAG: exception accessing process {Name}", imageName);
-            }
-            finally
-            {
-                try { p.Dispose(); } catch { }
-            }
+            catch { }
+            finally { try { p.Dispose(); } catch { } }
         }
-
-        Log.Information("Auto-launch DIAG: no {Name} process has a visible window — WILL LAUNCH", imageName);
         return false;
     }
 
