@@ -315,7 +315,8 @@ public sealed class TaskViewManager : IDisposable
                 Log.Warning("Auto-launch skipped for '{Desktop}': file not found: {Path}", targetName, resolved);
                 return;
             }
-            var isUrl = Uri.TryCreate(resolved, UriKind.Absolute, out _);
+            var isUrl = Uri.TryCreate(resolved, UriKind.Absolute, out var uri) &&
+                        (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
             var imageName = isUrl ? "" : Path.GetFileNameWithoutExtension(resolved);
             if (string.IsNullOrEmpty(imageName) && !isUrl) imageName = resolved;
 
@@ -488,42 +489,76 @@ public sealed class TaskViewManager : IDisposable
         }
     }
 
-    /// <summary>
-    /// Returns true if any running process with the given image name has a
-    /// visible main window. Since OnCurrentChanged fires AFTER a desktop switch,
-    /// a visible window means the program is already on the target desktop.
-    /// Windows on other virtual desktops are hidden by the OS and will report
-    /// IsWindowVisible=false.
-    /// </summary>
     private static bool IsAnyWindowOnDesktop(string imageName)
     {
-        if (string.IsNullOrEmpty(imageName)) return false;
+        if (string.IsNullOrEmpty(imageName))
+        {
+            Log.Information("Auto-launch DIAG: empty imageName — returning false");
+            return false;
+        }
 
         Process[] procs;
         try { procs = Process.GetProcessesByName(imageName); }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Auto-launch DIAG: GetProcessesByName threw for {Name}", imageName);
+            return false;
+        }
+
+        Log.Information("Auto-launch DIAG: GetProcessesByName({Name}) returned {Count} process(es)",
+            imageName, procs.Length);
+
+        if (procs.Length == 0)
+        {
+            Log.Information("Auto-launch DIAG: no {Name} processes found — will launch", imageName);
+            return false;
+        }
 
         foreach (var p in procs)
         {
             try
             {
-                if (p.MainWindowHandle == IntPtr.Zero) continue;
-                if (NativeMethods.IsWindowVisible(p.MainWindowHandle))
+                var hwnd = p.MainWindowHandle;
+                var pid = p.Id;
+                var hasExited = false;
+                try { hasExited = p.HasExited; } catch { }
+
+                Log.Information("Auto-launch DIAG: process {Name} PID={Pid} HasExited={Exited} MainWindowHandle={Hwnd}",
+                    imageName, pid, hasExited, hwnd);
+
+                if (hwnd == IntPtr.Zero)
+                {
+                    Log.Information("Auto-launch DIAG: PID={Pid} MainWindowHandle is IntPtr.Zero — skipping", pid);
+                    continue;
+                }
+
+                var isVisible = NativeMethods.IsWindowVisible(hwnd);
+                Log.Information("Auto-launch DIAG: PID={Pid} hwnd={Hwnd} IsWindowVisible={Visible}",
+                    pid, hwnd, isVisible);
+
+                if (isVisible)
                 {
                     Log.Information(
-                        "Auto-launch: {Name} already has a visible window (hwnd {Hwnd}) — skipping",
-                        imageName, p.MainWindowHandle);
+                        "Auto-launch DIAG: PID={Pid} IS VISIBLE — BLOCKING launch for {Name}", pid, imageName);
                     return true;
                 }
+                else
+                {
+                    Log.Information(
+                        "Auto-launch DIAG: PID={Pid} is NOT visible — continuing to check other processes", pid);
+                }
             }
-            catch
+            catch (Exception ex)
             {
+                Log.Warning(ex, "Auto-launch DIAG: exception accessing process {Name}", imageName);
             }
             finally
             {
                 try { p.Dispose(); } catch { }
             }
         }
+
+        Log.Information("Auto-launch DIAG: no {Name} process has a visible window — WILL LAUNCH", imageName);
         return false;
     }
 
