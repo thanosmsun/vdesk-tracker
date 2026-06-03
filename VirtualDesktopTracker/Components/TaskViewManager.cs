@@ -321,80 +321,74 @@ public sealed class TaskViewManager : IDisposable
 
             if (!isUrl)
             {
-                var existing = FindRunningProcesses(imageName);
-                if (existing.Length > 0)
+                bool launched = false;
+                Process? started = null;
+                try
                 {
-                    var moved = MoveAllToDesktop(existing, target);
-                    if (moved > 0)
+                    started = Process.Start(new ProcessStartInfo
                     {
-                        Log.Information("Auto-switch: moved {Count} existing {Name} window(s) to '{Desktop}'", moved, imageName, targetName);
-                    }
-                    else
-                    {
-                        Log.Information("Auto-switch: {Name} running but no moveable window; left in place", imageName);
-                    }
-                    return;
+                        FileName = resolved,
+                        UseShellExecute = true
+                    });
+                    launched = true;
                 }
-            }
+                catch (Exception ex)
+                {
+                    Log.Information(
+                        "Auto-launch: Process.Start threw for {Path}: {Msg} — will try move-existing",
+                        resolved, ex.Message);
+                }
 
-            Process.Start(new ProcessStartInfo
+                if (launched && started is not null)
+                {
+                    // Wait briefly — single-instance apps (Teams, VDeskTracker, etc.)
+                    // will exit within this window due to their mutex guard.
+                    Thread.Sleep(350);
+                    try
+                    {
+                        if (!started.HasExited)
+                        {
+                            // Multi-instance: new process is alive — we're done.
+                            Log.Information(
+                                "Auto-launched {Path} (new instance) for desktop {Desktop}",
+                                resolved, targetName);
+                            return;
+                        }
+                    }
+                    catch
+                    {
+                        // Process may have exited and been disposed between Sleep and HasExited.
+                    }
+                    try { started.Dispose(); } catch { }
+                }
+                else if (launched)
+                {
+                    // Process.Start returned null (defensive — very rare with ShellExecute).
+                    Thread.Sleep(350);
+                }
+
+                // Single-instance fallback: new process was rejected by the app's mutex.
+                // Move the already-running window to the target desktop instead.
+                Log.Information(
+                    "Auto-launch: new instance of {Name} rejected (single-instance mutex) — moving existing",
+                    imageName);
+                TryMoveExistingToDesktop(imageName, target, targetName);
+            }
+            else
             {
-                FileName = resolved,
-                UseShellExecute = true
-            });
-            Log.Information("Auto-launched {Path} for desktop {Desktop}", resolved, targetName);
+                // URLs have no concept of "single-instance" — just launch.
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = resolved,
+                    UseShellExecute = true
+                });
+                Log.Information("Auto-launched URL {Path} for desktop {Desktop}", resolved, targetName);
+            }
         }
         catch (Exception ex)
         {
             Log.Warning(ex, "Auto-launch/move failed for {Path} (desktop {Desktop})", path, targetName);
         }
-    }
-
-    private static Process[] FindRunningProcesses(string imageName)
-    {
-        if (string.IsNullOrEmpty(imageName)) return Array.Empty<Process>();
-        try
-        {
-            return Process.GetProcessesByName(imageName);
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "GetProcessesByName failed for {Name}", imageName);
-            return Array.Empty<Process>();
-        }
-    }
-
-    private int MoveAllToDesktop(Process[] procs, VirtualDesktop target)
-    {
-        var moved = 0;
-        foreach (var p in procs)
-        {
-            try
-            {
-                if (p.MainWindowHandle != IntPtr.Zero)
-                {
-                    try
-                    {
-                        if (MoveWindowToDesktop(p.MainWindowHandle, target))
-                        {
-                            moved++;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Warning(ex, "Move-to-desktop reflection threw");
-                    }
-                }
-            }
-            catch
-            {
-            }
-            finally
-            {
-                try { p.Dispose(); } catch { }
-            }
-        }
-        return moved;
     }
 
     private void TryMoveExistingToDesktop(string imageName, VirtualDesktop target, string targetName)
@@ -409,44 +403,83 @@ public sealed class TaskViewManager : IDisposable
         }
         if (procs.Length == 0)
         {
-            Log.Information("No existing {Name} process to move", imageName);
+            Log.Information("Auto-switch: no {Name} process found to move", imageName);
             return;
         }
-        var anyMoved = false;
+        int totalWindows = 0;
+        int moved = 0;
+        int failed = 0;
         foreach (var p in procs)
         {
             try
             {
                 if (p.MainWindowHandle != IntPtr.Zero)
                 {
+                    totalWindows++;
                     try
                     {
                         if (MoveWindowToDesktop(p.MainWindowHandle, target))
                         {
-                            anyMoved = true;
+                            moved++;
+                            Log.Information(
+                                "Auto-switch: moved {Name} (hwnd {Hwnd}) to '{Desktop}'",
+                                imageName, p.MainWindowHandle, targetName);
+                        }
+                        else
+                        {
+                            failed++;
+                            Log.Warning(
+                                "Auto-switch: MoveViewToDesktop returned false for {Name} (hwnd {Hwnd}) — " +
+                                "possible Slions version mismatch or desktop state issue",
+                                imageName, p.MainWindowHandle);
                         }
                     }
                     catch (Exception ex)
                     {
-                        Log.Warning(ex, "Move-to-desktop reflection threw");
+                        failed++;
+                        Log.Warning(ex,
+                            "Auto-switch: MoveViewToDesktop threw for {Name} (hwnd {Hwnd}) — " +
+                            "reflection path may be broken",
+                            imageName, p.MainWindowHandle);
                     }
                 }
             }
             catch
             {
+                // Process has exited or is in an invalid state — skip silently.
             }
             finally
             {
                 try { p.Dispose(); } catch { }
             }
         }
-        if (anyMoved)
+        if (moved > 0)
         {
-            Log.Information("Auto-switch: moved existing {Name} to '{Desktop}' (new instance rejected)", imageName, targetName);
+            Log.Information(
+                "Auto-switch: moved {Moved}/{Total} {Name} window(s) to '{Desktop}' (single-instance fallback)",
+                moved, totalWindows, imageName, targetName);
+        }
+        else if (totalWindows > 0 && failed > 0)
+        {
+            Log.Warning(
+                "Auto-switch: {Name} has {Total} window(s) but MoveViewToDesktop failed for all {Failed}. " +
+                "The reflection path to 'VirtualDesktopManagerInternal.MoveViewToDesktop' may be broken — " +
+                "check Slions VirtualDesktop package version compatibility.",
+                imageName, totalWindows, failed);
+        }
+        else if (totalWindows > 0)
+        {
+            Log.Information(
+                "Auto-switch: {Name} has {Total} window(s) but none were moved " +
+                "(possibly already on target desktop, or MoveViewToDesktop returned false silently)",
+                imageName, totalWindows);
         }
         else
         {
-            Log.Information("Auto-switch: {Name} running but no main window to move", imageName);
+            Log.Information(
+                "Auto-switch: {Name} process(es) found but no visible main window handle — " +
+                "the app may be minimized to the tray, a background process, or not yet fully started",
+                imageName);
         }
     }
 
