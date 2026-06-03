@@ -22,6 +22,7 @@ public sealed class TaskViewManager : IDisposable
     private long _lastAutoLaunchEndTick;
     private int _autoLaunchInProgress;
     private readonly object _autoLaunchLock = new();
+    private readonly Dictionary<Guid, HashSet<string>> _launchedPrograms = new();
     private bool _disposed;
 
     public event Action? DesktopsChanged;
@@ -242,6 +243,7 @@ public sealed class TaskViewManager : IDisposable
             }
         }
         DesktopsChanged?.Invoke();
+        _launchedPrograms.Remove(desktopId);
     }
 
     public void SetEnabled(Guid desktopId, bool isEnabled)
@@ -251,6 +253,7 @@ public sealed class TaskViewManager : IDisposable
         var al = row?.AutoLaunch ?? "[]";
         _store.UpsertTaskViewConfig(desktopId, name, isEnabled, al);
         DesktopsChanged?.Invoke();
+        _launchedPrograms.Remove(desktopId);
     }
 
     public void EnumerateAndSeed()
@@ -320,7 +323,7 @@ public sealed class TaskViewManager : IDisposable
             var imageName = isUrl ? "" : Path.GetFileNameWithoutExtension(resolved);
             if (string.IsNullOrEmpty(imageName) && !isUrl) imageName = resolved;
 
-            if (!isUrl && !string.IsNullOrEmpty(imageName) && IsAnyWindowOnDesktop(imageName))
+            if (!isUrl && !string.IsNullOrEmpty(imageName) && ShouldSkipLaunch(target.Id, imageName))
             {
                 return;
             }
@@ -489,35 +492,50 @@ public sealed class TaskViewManager : IDisposable
         }
     }
 
-    private static bool IsAnyWindowOnDesktop(string imageName)
+    private bool ShouldSkipLaunch(Guid desktopId, string imageName)
     {
-        if (string.IsNullOrEmpty(imageName)) return false;
-
-        var vdm = VirtualDesktopManager24H2.TryCreate();
-        if (vdm is null)
+        if (!_launchedPrograms.TryGetValue(desktopId, out var programs))
         {
-            Log.Information("Auto-launch: VDM24H2 unavailable — will launch unconditionally");
+            _launchedPrograms[desktopId] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            _launchedPrograms[desktopId].Add(imageName);
             return false;
         }
 
-        Process[] procs;
-        try { procs = Process.GetProcessesByName(imageName); }
-        catch { return false; }
-
-        foreach (var p in procs)
+        if (!programs.Contains(imageName))
         {
-            try
-            {
-                if (p.MainWindowHandle == IntPtr.Zero) continue;
-                if (vdm.IsWindowOnCurrentVirtualDesktop(p.MainWindowHandle))
-                {
-                    Log.Information("Auto-launch: {Name} already on current desktop — skipping", imageName);
-                    return true;
-                }
-            }
-            catch { }
-            finally { try { p.Dispose(); } catch { } }
+            programs.Add(imageName);
+            return false;
         }
+
+        if (HasVisibleWindow(imageName))
+        {
+            Log.Information(
+                "Auto-launch: {Name} already launched on this desktop and still running — skipping",
+                imageName);
+            return true;
+        }
+
+        programs.Remove(imageName);
+        return false;
+    }
+
+    private static bool HasVisibleWindow(string imageName)
+    {
+        try
+        {
+            var procs = Process.GetProcessesByName(imageName);
+            foreach (var p in procs)
+            {
+                try
+                {
+                    if (p.MainWindowHandle != IntPtr.Zero)
+                        return true;
+                }
+                catch { }
+                finally { try { p.Dispose(); } catch { } }
+            }
+        }
+        catch { }
         return false;
     }
 
