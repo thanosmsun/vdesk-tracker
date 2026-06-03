@@ -46,6 +46,14 @@ public sealed class ReportWindow : Form
     {
         Text = "VDesk Tracker - Report";
         FormBorderStyle = FormBorderStyle.Sizable;
+        FormClosing += (_, e) =>
+        {
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                Hide();
+            }
+        };
         MinimizeBox = true;
         MaximizeBox = true;
         ShowInTaskbar = true;

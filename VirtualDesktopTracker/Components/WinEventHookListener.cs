@@ -36,18 +36,46 @@ public sealed class WinEventHookListener : IDisposable
         get
         {
             var resolver = _desktopResolver;
-            if (resolver is null) return _ => null;
+            var vdm = _vdm;
+
             return hwnd =>
             {
+                if (resolver is not null)
+                {
+                    try
+                    {
+                        var id = resolver.GetDesktopIdForHwnd(hwnd);
+                        if (id != Guid.Empty) return id;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "Slions DesktopIdResolver failed for hwnd {Hwnd}, trying VDM fallback", hwnd);
+                    }
+                }
+
+                if (vdm is not null)
+                {
+                    try
+                    {
+                        int hr = vdm.GetWindowDesktopId(hwnd, out Guid id);
+                        if (hr == 0 && id != Guid.Empty) return id;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "VDM GetWindowDesktopId failed for hwnd {Hwnd}", hwnd);
+                    }
+                }
+
                 try
                 {
-                    var id = resolver.GetDesktopIdForHwnd(hwnd);
-                    return id == Guid.Empty ? null : id;
+                    var current = WindowsDesktop.VirtualDesktop.Current;
+                    if (current is not null) return current.Id;
                 }
                 catch
                 {
-                    return null;
                 }
+
+                return null;
             };
         }
     }
