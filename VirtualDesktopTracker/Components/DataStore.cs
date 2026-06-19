@@ -152,6 +152,29 @@ public sealed class DataStore : IDisposable
             }
         }
 
+        if (version < 3)
+        {
+            using var cmd = _writer.CreateCommand();
+            cmd.CommandText = @"
+UPDATE time_entries
+SET desktop_name = COALESCE(
+    (SELECT tvc.display_name FROM task_view_config tvc WHERE tvc.desktop_id = time_entries.desktop_id),
+    (SELECT dn.name FROM desktop_names dn WHERE dn.desktop_id = time_entries.desktop_id),
+    'Unknown'
+)
+WHERE desktop_name IS NULL OR desktop_name = '';";
+            cmd.ExecuteNonQuery();
+        }
+
+        if (version < 3)
+        {
+            using (var cmd = _writer.CreateCommand())
+            {
+                cmd.CommandText = "PRAGMA user_version = 3;";
+                cmd.ExecuteNonQuery();
+            }
+        }
+
         UpsertDefaultSettings();
     }
 

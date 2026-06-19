@@ -107,7 +107,7 @@ public sealed class SessionManager
         }
 
         CurrentDesktopId = desktopId;
-        CurrentDesktopName = desktopName;
+        CurrentDesktopName = string.IsNullOrEmpty(desktopName) ? LastNonNullDesktopName : desktopName;
         CurrentAppPath = appPath;
         CurrentAppName = appName;
         IntervalStartedAtTick = nowTick;
