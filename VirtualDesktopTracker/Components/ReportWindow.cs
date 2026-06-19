@@ -413,13 +413,14 @@ public sealed class ReportWindow : Form
             FileName = $"vdesk-report-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.csv"
         };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        var filteredRows = ApplyDesktopFilter(_lastRows);
         try
         {
             using var sw = new StreamWriter(dlg.FileName, false, new System.Text.UTF8Encoding(true));
             sw.WriteLine("Date,TaskView,App,Time,Percent");
-            long totalMs = _lastRows.Sum(r => r.TotalMs);
+            long totalMs = filteredRows.Sum(r => r.TotalMs);
             if (totalMs == 0) totalMs = 1;
-            foreach (var r in _lastRows)
+            foreach (var r in filteredRows)
             {
                 var pct = r.TotalMs * 100.0 / totalMs;
                 var dateStr = r.Date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);

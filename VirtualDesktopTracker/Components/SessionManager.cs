@@ -81,18 +81,62 @@ public sealed class SessionManager
         else
         {
             LastNonNullDesktopId = desktopId;
-            LastNonNullDesktopName = string.IsNullOrEmpty(desktopName) ? AutoDesktopName(desktopId) : desktopName;
-        }
 
-        if (!_isDesktopEnabled(desktopId))
-        {
-            return;
+            // Single DB lookup for both name resolution and enabled status
+            var config = _store.GetTaskViewConfig(desktopId);
+
+            // Resolve name from config or desktop_names table
+            if (config is not null && !string.IsNullOrEmpty(config.DisplayName))
+            {
+                LastNonNullDesktopName = config.DisplayName;
+            }
+            else
+            {
+                var stored = _resolveName(desktopId);
+                if (!string.IsNullOrEmpty(stored))
+                {
+                    LastNonNullDesktopName = stored;
+                }
+                else
+                {
+                    var n = _store.NextAutoDesktopNumber();
+                    var name = $"Desktop {n}";
+                    _store.UpsertDesktopName(desktopId, name);
+                    LastNonNullDesktopName = name;
+                }
+            }
+
+            // Check enabled from the same config row (no second DB call)
+            if (config is not null && !config.IsEnabled)
+            {
+                // Flush accumulated time so it's not attributed to the disabled desktop
+                if (CurrentDesktopId != Guid.Empty)
+                {
+                    var flushTick = Environment.TickCount64;
+                    var flushElapsed = flushTick - IntervalStartedAtTick;
+                    if (flushElapsed > 0)
+                    {
+                        _store.InsertTimeEntry(
+                            CurrentSessionId!, CurrentDesktopId, CurrentDesktopName,
+                            CurrentAppPath, CurrentAppName, IntervalStartedAtWall, flushElapsed,
+                            isCheckpoint: false, isRecovery: false);
+                    }
+                }
+                // Reset all timing state — no time is tracked while on a disabled desktop
+                CurrentDesktopId = Guid.Empty;
+                CurrentDesktopName = "";
+                IntervalStartedAtTick = Environment.TickCount64;
+                IntervalStartedAtWall = DateTimeOffset.UtcNow;
+                LastNonNullDesktopId = Guid.Empty;
+                LastNonNullDesktopName = "";
+                return;
+            }
         }
 
         var nowTick = Environment.TickCount64;
         var nowWall = DateTimeOffset.UtcNow;
         var elapsed = nowTick - IntervalStartedAtTick;
-        if (elapsed > 0)
+        if (elapsed > 0 && CurrentDesktopId != Guid.Empty)
         {
             _store.InsertTimeEntry(
                 CurrentSessionId!,

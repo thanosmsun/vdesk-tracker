@@ -70,6 +70,11 @@ public sealed class TaskViewWindow : Form
         _grid.CellValueChanged += OnCellValueChanged;
         _grid.CellDoubleClick += OnCellDoubleClick;
         _grid.SelectionChanged += (_, _) => UpdateButtonState();
+        _grid.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (_grid.CurrentCell is DataGridViewCheckBoxCell)
+                _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        };
 
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 56, Padding = new Padding(8) };
         _switchButton = new Button { Text = "Switch to selected", Size = new Size(150, 32), Location = new Point(8, 12) };
