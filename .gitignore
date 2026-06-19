@@ -47,3 +47,6 @@ desktop.ini
 ## Local-only files
 *.local
 appsettings.*.local.json
+
+## Build output
+query-tool/
