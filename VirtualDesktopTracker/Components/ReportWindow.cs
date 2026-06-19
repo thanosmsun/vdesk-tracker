@@ -30,8 +30,9 @@ public sealed class ReportWindow : Form
     private CheckBox _keepOnTopCheck = null!;
     private Button _exportCsvButton = null!;
     private Label _statusLabel = null!;
-    private CheckedListBox _desktopFilter = null!;
-    private Button _selectAllButton = null!;
+    private ComboBox _desktopFilterCombo = null!;
+    private Button _clearFilterButton = null!;
+    private CheckedListBox? _filterPopupList;
 
     private List<ReportRow> _lastRows = new();
 
@@ -118,36 +119,30 @@ public sealed class ReportWindow : Form
         _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "%", FillWeight = 10, Name = "Pct" });
         _grid.CellDoubleClick += OnGridDoubleClick;
 
-        var filterPanel = new FlowLayoutPanel
+        var filterPanel = new Panel
         {
             Dock = DockStyle.Top,
-            Height = 80,
-            Padding = new Padding(8, 4, 8, 4),
-            AutoScroll = true
+            Height = 36,
+            Padding = new Padding(8, 4, 8, 4)
         };
-        var filterLabel = new Label { Text = "Visible task views:", AutoSize = true, Margin = new Padding(0, 6, 6, 0) };
-        _desktopFilter = new CheckedListBox
+        var filterLabel = new Label { Text = "Visible task views:", AutoSize = true, Location = new Point(8, 8) };
+        _desktopFilterCombo = new ComboBox
         {
-            CheckOnClick = true,
-            IntegralHeight = true,
-            Height = 60,
-            Width = 360,
-            MaximumSize = new Size(700, 120),
-            MinimumSize = new Size(200, 60)
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Location = new Point(130, 6),
+            Width = 300,
+            Height = 24
         };
-        _selectAllButton = new Button { Text = "All", Width = 50, Height = 24, Margin = new Padding(4, 0, 0, 0) };
-        _selectAllButton.Click += (_, _) => SelectAllDesktops(true);
-        _desktopFilter.ItemCheck += (_, _) =>
+        _desktopFilterCombo.DropDown += (_, _) =>
         {
-            BeginInvoke(new Action(() =>
-            {
-                var filtered = ApplyDesktopFilter(_lastRows);
-                RenderGrid(filtered);
-            }));
+            _desktopFilterCombo.DroppedDown = false;
+            ShowFilterPopup();
         };
+        _clearFilterButton = new Button { Text = "All", Width = 50, Height = 24, Location = new Point(438, 6) };
+        _clearFilterButton.Click += (_, _) => SelectAllDesktops(true);
         filterPanel.Controls.Add(filterLabel);
-        filterPanel.Controls.Add(_desktopFilter);
-        filterPanel.Controls.Add(_selectAllButton);
+        filterPanel.Controls.Add(_desktopFilterCombo);
+        filterPanel.Controls.Add(_clearFilterButton);
 
         var bottom = new TableLayoutPanel
         {
@@ -253,20 +248,24 @@ public sealed class ReportWindow : Form
 
     private void PopulateDesktopFilter()
     {
+        if (_filterPopupList is null) return;
         var names = _lastRows.Select(r => r.TaskViewName).Distinct().OrderBy(s => s).ToList();
         var previouslyChecked = GetCheckedDesktopNames();
-        _desktopFilter.Items.Clear();
+        _filterPopupList.Items.Clear();
         foreach (var n in names)
         {
             var isChecked = previouslyChecked.Count == 0 || previouslyChecked.Contains(n);
-            _desktopFilter.Items.Add(n, isChecked);
+            _filterPopupList.Items.Add(n, isChecked);
         }
+        UpdateComboText();
     }
 
     private HashSet<string> GetCheckedDesktopNames()
     {
         var set = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var item in _desktopFilter.CheckedItems)
+        var list = _filterPopupList;
+        if (list is null) return set;
+        foreach (var item in list.CheckedItems)
         {
             if (item is string s) set.Add(s);
         }
@@ -282,11 +281,76 @@ public sealed class ReportWindow : Form
 
     private void SelectAllDesktops(bool on)
     {
-        for (int i = 0; i < _desktopFilter.Items.Count; i++)
+        if (_filterPopupList is null) return;
+        for (int i = 0; i < _filterPopupList.Items.Count; i++)
         {
-            _desktopFilter.SetItemChecked(i, on);
+            _filterPopupList.SetItemChecked(i, on);
         }
-        GenerateReport();
+        UpdateComboText();
+        var filtered = ApplyDesktopFilter(_lastRows);
+        RenderGrid(filtered);
+    }
+
+    private void ShowFilterPopup()
+    {
+        _filterPopupList = new CheckedListBox
+        {
+            CheckOnClick = true,
+            Height = 150,
+            Width = _desktopFilterCombo.Width,
+            BorderStyle = BorderStyle.None,
+            IntegralHeight = true
+        };
+
+        PopulateDesktopFilter();
+
+        _filterPopupList.ItemCheck += (_, _) =>
+        {
+            BeginInvoke(new Action(() =>
+            {
+                UpdateComboText();
+                var filtered = ApplyDesktopFilter(_lastRows);
+                RenderGrid(filtered);
+            }));
+        };
+
+        var popup = new ToolStripDropDown();
+        popup.AutoClose = true;
+        var host = new ToolStripControlHost(_filterPopupList);
+        host.AutoSize = false;
+        var itemHeight = _filterPopupList.ItemHeight;
+        host.Height = Math.Min(150, _filterPopupList.Items.Count * itemHeight + 4);
+        host.Width = _filterPopupList.Width;
+        popup.Items.Add(host);
+        popup.Show(_desktopFilterCombo, new Point(0, _desktopFilterCombo.Height));
+    }
+
+    private void UpdateComboText()
+    {
+        if (_filterPopupList is null)
+        {
+            _desktopFilterCombo.Text = "";
+            return;
+        }
+        var checkedItems = _filterPopupList.CheckedItems;
+        if (checkedItems.Count == 0)
+        {
+            _desktopFilterCombo.Text = "(none)";
+        }
+        else if (checkedItems.Count == _filterPopupList.Items.Count)
+        {
+            _desktopFilterCombo.Text = "All";
+        }
+        else if (checkedItems.Count <= 2)
+        {
+            var names = new List<string>();
+            foreach (var item in checkedItems) names.Add(item.ToString()!);
+            _desktopFilterCombo.Text = string.Join(", ", names);
+        }
+        else
+        {
+            _desktopFilterCombo.Text = $"{checkedItems.Count} selected";
+        }
     }
 
     private void RenderGrid(List<ReportRow> rows)
