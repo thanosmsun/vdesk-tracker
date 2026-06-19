@@ -5,6 +5,7 @@ using System.IO;
 using System.Reflection;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using Serilog;
 using WindowsDesktop;
 using VirtualDesktopTracker.Components.Interop;
@@ -306,6 +307,30 @@ public sealed class TaskViewManager : IDisposable
         }
     }
 
+    private async Task LaunchOrMoveForDesktopAsync(Guid targetDesktopId, IReadOnlyList<string> paths)
+    {
+        if (!VirtualDesktop.IsSupported || paths is null || paths.Count == 0) return;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unique = new List<string>();
+        foreach (var p in paths)
+        {
+            if (string.IsNullOrWhiteSpace(p)) continue;
+            if (seen.Add(p)) unique.Add(p);
+        }
+        if (unique.Count == 0) return;
+        var target = TryFindDesktop(targetDesktopId);
+        if (target is null)
+        {
+            Log.Warning("LaunchOrMoveForDesktopAsync: desktop {DesktopId} not found", targetDesktopId);
+            return;
+        }
+        var targetName = target.Name;
+        foreach (var p in unique)
+        {
+            await LaunchOrMoveOneAsync(p, target, targetName);
+        }
+    }
+
     private void LaunchOrMoveOne(string path, VirtualDesktop target, string targetName)
     {
         try
@@ -386,6 +411,92 @@ public sealed class TaskViewManager : IDisposable
             else
             {
                 // URLs have no concept of "single-instance" — just launch.
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = resolved,
+                    UseShellExecute = true
+                });
+                Log.Information("Auto-launched URL {Path} for desktop {Desktop}", resolved, targetName);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Auto-launch/move failed for {Path} (desktop {Desktop})", path, targetName);
+        }
+    }
+
+    private async Task LaunchOrMoveOneAsync(string path, VirtualDesktop target, string targetName)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            var resolved = Environment.ExpandEnvironmentVariables(path.Trim());
+            if (string.IsNullOrEmpty(resolved)) return;
+            if (!File.Exists(resolved) && !Uri.TryCreate(resolved, UriKind.Absolute, out _))
+            {
+                Log.Warning("Auto-launch skipped for '{Desktop}': file not found: {Path}", targetName, resolved);
+                return;
+            }
+            var isUrl = Uri.TryCreate(resolved, UriKind.Absolute, out var uri) &&
+                        (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+            var imageName = isUrl ? "" : Path.GetFileNameWithoutExtension(resolved);
+            if (string.IsNullOrEmpty(imageName) && !isUrl) imageName = resolved;
+
+            if (!isUrl && !string.IsNullOrEmpty(imageName) && ShouldSkipLaunch(target.Id, imageName))
+            {
+                return;
+            }
+
+            if (!isUrl)
+            {
+                bool launched = false;
+                Process? started = null;
+                try
+                {
+                    started = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = resolved,
+                        UseShellExecute = true
+                    });
+                    launched = true;
+                }
+                catch (Exception ex)
+                {
+                    Log.Information(
+                        "Auto-launch: Process.Start threw for {Path}: {Msg} — will try move-existing",
+                        resolved, ex.Message);
+                }
+
+                if (launched && started is not null)
+                {
+                    await Task.Delay(350);
+                    try
+                    {
+                        if (!started.HasExited)
+                        {
+                            Log.Information(
+                                "Auto-launched {Path} (new instance) for desktop {Desktop}",
+                                resolved, targetName);
+                            return;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                    try { started.Dispose(); } catch { }
+                }
+                else if (launched)
+                {
+                    await Task.Delay(350);
+                }
+
+                Log.Information(
+                    "Auto-launch: new instance of {Name} rejected (single-instance mutex) — moving existing",
+                    imageName);
+                TryMoveExistingToDesktop(imageName, target, targetName);
+            }
+            else
+            {
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = resolved,
@@ -638,61 +749,61 @@ public sealed class TaskViewManager : IDisposable
         DesktopsChanged?.Invoke();
     }
 
-    private void OnCurrentChanged(object? sender, VirtualDesktopChangedEventArgs e)
+    private async void OnCurrentChanged(object? sender, VirtualDesktopChangedEventArgs e)
     {
         Log.Information("OnCurrentChanged fired: newId={NewId} oldId={OldId} newName={NewName}", e.NewDesktop?.Id, e.OldDesktop?.Id, e.NewDesktop?.Name);
-        if (e.NewDesktop is not null)
+        DesktopsChanged?.Invoke();
+        if (e.NewDesktop is null) return;
+
+        var desktopId = e.NewDesktop.Id;
+        var nowTick = Environment.TickCount64;
+        const long debounceMs = 2000;
+        bool acquired = false;
+        try
         {
-            var desktopId = e.NewDesktop.Id;
-            var nowTick = Environment.TickCount64;
-            const long debounceMs = 2000;
-            bool acquired = false;
-            try
+            Monitor.Enter(_autoLaunchLock, ref acquired);
+            if (_autoLaunchInProgress != 0)
             {
-                Monitor.Enter(_autoLaunchLock, ref acquired);
-                if (_autoLaunchInProgress != 0)
-                {
-                    Log.Information("OnCurrentChanged: auto-launch already in progress; skipping for {DesktopId}", desktopId);
-                    return;
-                }
-                if ((nowTick - _lastAutoLaunchEndTick) < debounceMs)
-                {
-                    Log.Information("OnCurrentChanged: auto-launch debounced for {DesktopId} (last ended {Delta}ms ago)", desktopId, nowTick - _lastAutoLaunchEndTick);
-                    return;
-                }
-                _autoLaunchInProgress = 1;
+                Log.Information("OnCurrentChanged: auto-launch already in progress; skipping for {DesktopId}", desktopId);
+                return;
             }
-            finally
+            if ((nowTick - _lastAutoLaunchEndTick) < debounceMs)
             {
-                if (acquired) Monitor.Exit(_autoLaunchLock);
+                Log.Information("OnCurrentChanged: auto-launch debounced for {DesktopId} (last ended {Delta}ms ago)", desktopId, nowTick - _lastAutoLaunchEndTick);
+                return;
             }
-            try
+            _autoLaunchInProgress = 1;
+        }
+        finally
+        {
+            if (acquired) Monitor.Exit(_autoLaunchLock);
+        }
+
+        try
+        {
+            var row = _store.GetTaskViewConfig(desktopId);
+            if (row is not null && row.IsEnabled)
             {
-                var row = _store.GetTaskViewConfig(desktopId);
-                if (row is not null && row.IsEnabled)
+                var paths = ParseAutoLaunch(row.AutoLaunch);
+                if (paths.Count > 0)
                 {
-                    var paths = ParseAutoLaunch(row.AutoLaunch);
-                    if (paths.Count > 0)
-                    {
-                        Log.Information("OnCurrentChanged: launching/moving {Count} program(s) for '{Desktop}'", paths.Count, row.DisplayName);
-                        LaunchOrMoveForDesktop(desktopId, paths);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "OnCurrentChanged auto-launch failed");
-            }
-            finally
-            {
-                lock (_autoLaunchLock)
-                {
-                    _autoLaunchInProgress = 0;
-                    _lastAutoLaunchEndTick = Environment.TickCount64;
+                    Log.Information("OnCurrentChanged: launching/moving {Count} program(s) for '{Desktop}'", paths.Count, row.DisplayName);
+                    await LaunchOrMoveForDesktopAsync(desktopId, paths);
                 }
             }
         }
-        DesktopsChanged?.Invoke();
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "OnCurrentChanged auto-launch failed");
+        }
+        finally
+        {
+            lock (_autoLaunchLock)
+            {
+                _autoLaunchInProgress = 0;
+                _lastAutoLaunchEndTick = Environment.TickCount64;
+            }
+        }
     }
 
     private void OnRenamed(object? sender, VirtualDesktopRenamedEventArgs e)

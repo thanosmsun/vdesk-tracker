@@ -121,7 +121,7 @@ public sealed class ReportWindow : Form
         var filterPanel = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 32,
+            Height = 80,
             Padding = new Padding(8, 4, 8, 4),
             AutoScroll = true
         };
@@ -129,16 +129,22 @@ public sealed class ReportWindow : Form
         _desktopFilter = new CheckedListBox
         {
             CheckOnClick = true,
-            IntegralHeight = false,
-            Height = 24,
+            IntegralHeight = true,
+            Height = 60,
             Width = 360,
-            MultiColumn = true,
-            ColumnWidth = 120,
-            MaximumSize = new Size(700, 24),
-            MinimumSize = new Size(200, 24)
+            MaximumSize = new Size(700, 120),
+            MinimumSize = new Size(200, 60)
         };
         _selectAllButton = new Button { Text = "All", Width = 50, Height = 24, Margin = new Padding(4, 0, 0, 0) };
         _selectAllButton.Click += (_, _) => SelectAllDesktops(true);
+        _desktopFilter.ItemCheck += (_, _) =>
+        {
+            BeginInvoke(new Action(() =>
+            {
+                var filtered = ApplyDesktopFilter(_lastRows);
+                RenderGrid(filtered);
+            }));
+        };
         filterPanel.Controls.Add(filterLabel);
         filterPanel.Controls.Add(_desktopFilter);
         filterPanel.Controls.Add(_selectAllButton);
