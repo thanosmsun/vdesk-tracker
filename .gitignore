@@ -1,0 +1,59 @@
+## .NET build outputs
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+*.cachefile
+*.ncb
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Publish output (built artifacts)
+publish/*.exe
+publish/*.pdb
+publish/*.deps.json
+publish/*.runtimeconfig.json
+publish/Logs/
+
+## IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+## Test results
+TestResults/
+*.coverage
+*.trx
+
+## OS junk
+Thumbs.db
+.DS_Store
+desktop.ini
+
+## Local logs / debug
+*.log
+*.tmp
+*.bak
+
+## NuGet
+*.nupkg
+*.snupkg
+.nuget/
+
+## Local-only files
+*.local
+appsettings.*.local.json
+
+## Private planning docs (never publish)
+local/
+
+## Local tool caches
+.alpackages/
+.snapshots/
+
+## Build output
+query-tool/
