@@ -16,9 +16,8 @@ public static class Logger
 
         Directory.CreateDirectory(AppPaths.LogsDirectory);
 
-        var logFile = Path.Combine(
-            AppPaths.LogsDirectory,
-            $"app-{DateTime.Now:yyyyMMdd}.log");
+        // RollingInterval.Day appends the date itself, producing app-YYYYMMDD.log
+        var logFile = Path.Combine(AppPaths.LogsDirectory, "app-.log");
 
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Information()

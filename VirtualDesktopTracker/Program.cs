@@ -46,6 +46,7 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, e) => Log.Error(e.Exception, "UI thread exception");
 
         DataStore? dataStore = null;

@@ -7,6 +7,12 @@ namespace VirtualDesktopTracker.Components;
 
 public sealed class CrashRecovery
 {
+    // The checkpoint timer flushes every 30s, so at most one checkpoint
+    // interval can be unaccounted for when the app exits uncleanly.
+    // Anything beyond that is shutdown/sleep/away time and must NOT be
+    // credited as tracked activity.
+    private static readonly TimeSpan MaxRecoveryCredit = TimeSpan.FromSeconds(35);
+
     private readonly DataStore _store;
 
     public CrashRecovery(DataStore store)
@@ -18,28 +24,32 @@ public sealed class CrashRecovery
     {
         try
         {
-            var orphan = FindOrphanedSession();
-            if (orphan is null) return null;
-            var lastEntry = FindLastTimeEntry(orphan.SessionId);
+            var orphans = FindOrphanedSessions();
+            if (orphans.Count == 0) return null;
+
+            long creditedMs = 0;
             _store.Write((c, tx) =>
             {
-                if (lastEntry is not null)
+                foreach (var orphan in orphans)
                 {
-                    var nowTick = Environment.TickCount64;
-                    var gap = nowTick - (lastEntry.StartedAtTick + lastEntry.DurationMs);
-                    if (gap < 0) gap = 0;
+                    var lastEntry = FindLastTimeEntry(c, orphan.SessionId);
+                    var endWall = lastEntry?.EndWall ?? orphan.StartedAt;
 
-                    if (orphan.SessionId is not null)
+                    using (var stamp = c.CreateCommand())
                     {
-                        using (var stamp = c.CreateCommand())
-                        {
-                            stamp.Transaction = tx;
-                            stamp.CommandText = "UPDATE sessions SET ended_at = @now WHERE id = @id;";
-                            stamp.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
-                            stamp.Parameters.AddWithValue("@id", orphan.SessionId);
-                            stamp.ExecuteNonQuery();
-                        }
+                        stamp.Transaction = tx;
+                        stamp.CommandText = "UPDATE sessions SET ended_at = @end WHERE id = @id;";
+                        stamp.Parameters.AddWithValue("@end", endWall.ToString("o"));
+                        stamp.Parameters.AddWithValue("@id", orphan.SessionId);
+                        stamp.ExecuteNonQuery();
                     }
+
+                    if (lastEntry is null) continue;
+
+                    var gap = DateTimeOffset.UtcNow - endWall;
+                    if (gap < TimeSpan.Zero) gap = TimeSpan.Zero;
+                    var credit = gap > MaxRecoveryCredit ? MaxRecoveryCredit : gap;
+                    if (credit <= TimeSpan.Zero) continue;
 
                     var newSessionId = Guid.NewGuid().ToString("N");
                     using (var ins = c.CreateCommand())
@@ -47,9 +57,9 @@ public sealed class CrashRecovery
                         ins.Transaction = tx;
                         ins.CommandText = @"
 INSERT INTO sessions(id, started_at, ended_at, start_reason, created_app, machine_name)
-VALUES(@id, @now, NULL, 'crash_recovery', @app, @machine);";
+VALUES(@id, @start, NULL, 'crash_recovery', @app, @machine);";
                         ins.Parameters.AddWithValue("@id", newSessionId);
-                        ins.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+                        ins.Parameters.AddWithValue("@start", endWall.ToString("o"));
                         ins.Parameters.AddWithValue("@app", "VirtualDesktopTracker");
                         ins.Parameters.AddWithValue("@machine", Environment.MachineName);
                         ins.ExecuteNonQuery();
@@ -66,25 +76,15 @@ VALUES(@sid, @did, @dn, @ap, @an, @sa, @dur, 0, 1);";
                         ins2.Parameters.AddWithValue("@dn", lastEntry.DesktopName);
                         ins2.Parameters.AddWithValue("@ap", lastEntry.AppPath);
                         ins2.Parameters.AddWithValue("@an", lastEntry.AppName);
-                        ins2.Parameters.AddWithValue("@sa", DateTimeOffset.UtcNow.ToString("o"));
-                        ins2.Parameters.AddWithValue("@dur", gap);
+                        ins2.Parameters.AddWithValue("@sa", endWall.ToString("o"));
+                        ins2.Parameters.AddWithValue("@dur", (long)credit.TotalMilliseconds);
                         ins2.ExecuteNonQuery();
                     }
-                }
-                else
-                {
-                    if (orphan.SessionId is not null)
-                    {
-                        using var stamp = c.CreateCommand();
-                        stamp.Transaction = tx;
-                        stamp.CommandText = "UPDATE sessions SET ended_at = @now WHERE id = @id;";
-                        stamp.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
-                        stamp.Parameters.AddWithValue("@id", orphan.SessionId);
-                        stamp.ExecuteNonQuery();
-                    }
+
+                    creditedMs += (long)credit.TotalMilliseconds;
                 }
             });
-            return lastEntry is null ? new CrashRecoveryResult(0) : new CrashRecoveryResult(Environment.TickCount64 - (lastEntry.StartedAtTick + lastEntry.DurationMs));
+            return new CrashRecoveryResult(creditedMs);
         }
         catch (Exception ex)
         {
@@ -93,66 +93,43 @@ VALUES(@sid, @did, @dn, @ap, @an, @sa, @dur, 0, 1);";
         }
     }
 
-    private OrphanedSession? FindOrphanedSession()
+    private List<OrphanedSession> FindOrphanedSessions()
     {
-        string? id = null;
-        var startedAt = DateTimeOffset.MinValue;
+        var list = new List<OrphanedSession>();
         _store.Read(c =>
         {
             using var cmd = c.CreateCommand();
-            cmd.CommandText = "SELECT id, started_at FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1;";
+            cmd.CommandText = "SELECT id, started_at FROM sessions WHERE ended_at IS NULL ORDER BY started_at ASC;";
             using var rdr = cmd.ExecuteReader();
-            if (rdr.Read())
+            while (rdr.Read())
             {
-                id = rdr.GetString(0);
-                startedAt = DateTimeOffset.Parse(rdr.GetString(1));
+                list.Add(new OrphanedSession(rdr.GetString(0), DateTimeOffset.Parse(rdr.GetString(1))));
             }
         });
-        return id is null ? null : new OrphanedSession(id, startedAt);
+        return list;
     }
 
-    private LastEntryInfo? FindLastTimeEntry(string? sessionId)
+    private static LastEntryInfo? FindLastTimeEntry(SqliteConnection c, string sessionId)
     {
-        if (sessionId is null) return null;
-        LastEntryInfo? result = null;
-        _store.Read(c =>
-        {
-            using var cmd = c.CreateCommand();
-            cmd.CommandText = @"
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = @"
 SELECT desktop_id, desktop_name, app_path, app_name,
-       CAST(strftime('%s', started_at) AS INTEGER)*1000 AS started_unix_ms,
-       duration_ms
+       CAST(strftime('%s', started_at) AS INTEGER)*1000 + duration_ms AS end_unix_ms
 FROM time_entries
 WHERE session_id = @sid
 ORDER BY id DESC LIMIT 1;";
-            cmd.Parameters.AddWithValue("@sid", sessionId);
-            using var rdr = cmd.ExecuteReader();
-            if (rdr.Read())
-            {
-                var startedMs = rdr.GetInt64(4);
-                var startedAt = DateTimeOffset.FromUnixTimeMilliseconds(startedMs);
-                var startedTick = DateTimeToTickApprox(startedAt);
-                result = new LastEntryInfo(
-                    Guid.Parse(rdr.GetString(0)),
-                    rdr.GetString(1),
-                    rdr.GetString(2),
-                    rdr.GetString(3),
-                    startedTick,
-                    rdr.GetInt64(5));
-            }
-        });
-        return result;
-    }
-
-    private static long DateTimeToTickApprox(DateTimeOffset wall)
-    {
-        var nowWall = DateTimeOffset.UtcNow;
-        var nowTick = Environment.TickCount64;
-        var diff = nowWall - wall;
-        return nowTick - (long)diff.TotalMilliseconds;
+        cmd.Parameters.AddWithValue("@sid", sessionId);
+        using var rdr = cmd.ExecuteReader();
+        if (!rdr.Read()) return null;
+        return new LastEntryInfo(
+            Guid.Parse(rdr.GetString(0)),
+            rdr.GetString(1),
+            rdr.GetString(2),
+            rdr.GetString(3),
+            DateTimeOffset.FromUnixTimeMilliseconds(rdr.GetInt64(4)));
     }
 }
 
 public sealed record OrphanedSession(string SessionId, DateTimeOffset StartedAt);
-public sealed record LastEntryInfo(Guid DesktopId, string DesktopName, string AppPath, string AppName, long StartedAtTick, long DurationMs);
+public sealed record LastEntryInfo(Guid DesktopId, string DesktopName, string AppPath, string AppName, DateTimeOffset EndWall);
 public sealed record CrashRecoveryResult(long GapMs);

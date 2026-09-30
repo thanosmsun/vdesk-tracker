@@ -232,6 +232,12 @@ public sealed class WinEventHookListener : IDisposable
                 var id = _desktopResolver.GetDesktopIdForHwnd(hwnd);
                 if (id != Guid.Empty) return id;
             }
+            catch (COMException ex) when (ex.HResult == unchecked((int)0x8002802B))
+            {
+                // TYPE_E_ELEMENTNOTFOUND: expected for transient/closing windows;
+                // fall through to the fallback resolvers without spamming the log.
+                Log.Debug(ex, "Slions desktop resolver: view not found for hwnd {Hwnd}", hwnd);
+            }
             catch (Exception ex)
             {
                 Log.Warning(ex, "Slions desktop resolver failed");
